@@ -6,15 +6,28 @@ Analyzes how claimant (employee) survey scores impact:
 - Employer persistency
 """
 
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, render_template, request, jsonify, send_file
+from flask_cors import CORS
 import os
+import io
+from datetime import datetime
 import pandas as pd
 import numpy as np
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
 import plotly.express as px
 import plotly.graph_objects as go
 from werkzeug.utils import secure_filename
+from sklearn.preprocessing import LabelEncoder
+import statsmodels.api as sm
+from statsmodels.discrete.discrete_model import Logit
+from statsmodels.stats.outliers_influence import variance_inflation_factor
 
 app = Flask(__name__, template_folder='templates', static_folder='static')
+CORS(app)
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max upload
 
 UPLOAD_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'uploads')
@@ -144,9 +157,6 @@ def bin_variable():
         labels = [f'{bins_sorted[i]}-{bins_sorted[i+1]}' for i in range(len(bins_sorted) - 1)]
 
     new_col = f'{column}_binned'
-    if new_col in df.columns:
-        return jsonify({'error': f'Column "{new_col}" already exists. Use a different source column.'}), 400
-
     df[new_col] = pd.cut(df[column], bins=bins_sorted, labels=labels, include_lowest=True)
     df.to_csv(path, index=False)
 
@@ -415,5 +425,439 @@ def visualize():
     return jsonify({'success': True, 'chart': chart_dict})
 
 
+def _is_binary_target(series):
+    """True if series has exactly 2 unique non-null values (suitable for logistic)."""
+    uniq = series.dropna().unique()
+    return len(uniq) == 2
+
+
+def _prepare_regression_data(df, target_col, control_cols):
+    """
+    Build X (design matrix) and y from df. One-hot encode categoricals, drop rows with missing target.
+    Returns (X_df, y_series, feature_names) with feature_names list for coefficient labels.
+    """
+    use_cols = [target_col] + [c for c in control_cols if c != target_col]
+    work = df[use_cols].copy()
+    work = work.dropna(subset=[target_col])
+    y = work[target_col]
+    X_cols = [c for c in control_cols if c != target_col]
+    if not X_cols:
+        return None, y, []
+
+    X_parts = []
+    feature_names = []
+    for c in X_cols:
+        col = work[c]
+        if col.dtype in (np.int64, np.int32, np.float64, np.float32) or (hasattr(col.dtype, 'kind') and col.dtype.kind in 'iufc'):
+            X_parts.append(pd.DataFrame({c: col}))
+            feature_names.append(c)
+        else:
+            dummies = pd.get_dummies(col.astype(str), prefix=c, drop_first=True)
+            X_parts.append(dummies)
+            feature_names.extend(dummies.columns.tolist())
+    X_df = pd.concat(X_parts, axis=1)
+    return X_df, y, feature_names
+
+
+@app.route('/api/regression', methods=['POST'])
+def run_regression():
+    """
+    Run linear or logistic regression. Predictors = covariates (key) + controls.
+    Model type: numeric with 2 unique values → logistic, else → linear.
+    Uses statsmodels for p-values.
+    """
+    data = request.get_json() or {}
+    filename = data.get('filename')
+    target = data.get('target')
+    covariates = data.get('covariates') or []
+    controls = data.get('controls') or []
+
+    if not filename or not allowed_file(filename):
+        return jsonify({'error': 'Valid filename required'}), 400
+    if not target:
+        return jsonify({'error': 'Target variable is required'}), 400
+
+    path = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(filename))
+    if not os.path.isfile(path):
+        return jsonify({'error': 'File not found'}), 404
+
+    try:
+        df = pd.read_csv(path)
+    except Exception as e:
+        return jsonify({'error': f'Failed to load CSV: {str(e)}'}), 400
+
+    if target not in df.columns:
+        return jsonify({'error': f'Target column "{target}" not found'}), 400
+
+    cov_cols = [c for c in covariates if c in df.columns and c != target]
+    control_cols = [c for c in controls if c in df.columns and c != target]
+    all_pred_cols = list(dict.fromkeys(cov_cols + control_cols))
+    if not all_pred_cols:
+        return jsonify({'error': 'Select at least one covariate or control variable'}), 400
+
+    all_pred_cols = [target] + all_pred_cols
+    X_df, y_series, feature_names = _prepare_regression_data(df, target, all_pred_cols)
+    if X_df is None or len(X_df) < 2:
+        return jsonify({'error': 'Need at least one predictor and 2 valid rows'}), 400
+
+    y = y_series.values
+    X = X_df.values.astype(float)
+    n_obs = len(y)
+
+    mask = ~np.isnan(X).any(axis=1)
+    X = X[mask]
+    y = y[mask]
+    if len(y) < 2:
+        return jsonify({'error': 'Too few rows after removing missing values'}), 400
+
+    # Normalize (z-score) key predictor columns so coefficients are comparable for relative importance
+    def _is_covariate_feature(fname, cov_list):
+        if fname in cov_list:
+            return True
+        return any(str(fname).startswith(str(c) + '_') for c in cov_list)
+
+    for j in range(X.shape[1]):
+        if j < len(feature_names) and _is_covariate_feature(feature_names[j], cov_cols):
+            col = X[:, j]
+            mu, sig = col.mean(), col.std()
+            if sig > 1e-10:
+                X[:, j] = (col - mu) / sig
+
+    X_const = sm.add_constant(X, has_constant='add')
+    const_names = ['const'] + feature_names
+
+    model_type = 'linear'
+    if df[target].dtype in (object, 'object') or (hasattr(df[target].dtype, 'kind') and df[target].dtype.kind not in 'iufc'):
+        le = LabelEncoder()
+        y_enc = le.fit_transform(y.astype(str))
+        if len(le.classes_) != 2:
+            return jsonify({'error': 'For logistic regression target must have exactly 2 categories.'}), 400
+        model_type = 'logistic'
+        y = y_enc.astype(float)
+    else:
+        y = y.astype(float)
+        if _is_binary_target(pd.Series(y)):
+            model_type = 'logistic'
+            y = y.astype(int)
+
+    result = {
+        'success': True,
+        'model_type': model_type,
+        'target': target,
+        'n_obs': int(len(y)),
+        'feature_names': feature_names,
+        'covariate_names': cov_cols,
+        'covariates_standardized': True,
+    }
+
+    def _param(p, i):
+        return float(np.asarray(p)[i])
+
+    try:
+        if model_type == 'linear':
+            model = sm.OLS(y, X_const).fit()
+            result['r2'] = float(model.rsquared)
+            result['rmse'] = float(np.sqrt(model.mse_resid))
+            result['intercept'] = _param(model.params, 0)
+            result['coefficients'] = [_param(model.params, i) for i in range(1, len(model.params))]
+            result['coefficient_labels'] = feature_names
+            result['pvalues'] = [_param(model.pvalues, i) for i in range(len(model.pvalues))]
+            result['pvalue_labels'] = const_names
+            result['bse'] = [_param(model.bse, i) for i in range(len(model.bse))]
+            ci = np.asarray(model.conf_int(alpha=0.05))
+            result['ci_lower'] = [float(ci[i, 0]) for i in range(len(const_names))]
+            result['ci_upper'] = [float(ci[i, 1]) for i in range(len(const_names))]
+        else:
+            model = Logit(y, X_const).fit(disp=0)
+            result['accuracy'] = float((model.predict(X_const).round() == y).mean())
+            result['intercept'] = _param(model.params, 0)
+            result['coefficients'] = [_param(model.params, i) for i in range(1, len(model.params))]
+            result['coefficient_labels'] = feature_names
+            result['pvalues'] = [_param(model.pvalues, i) for i in range(len(model.pvalues))]
+            result['pvalue_labels'] = const_names
+            result['bse'] = [_param(model.bse, i) for i in range(len(model.bse))]
+            ci = np.asarray(model.conf_int(alpha=0.05))
+            result['ci_lower'] = [float(ci[i, 0]) for i in range(len(const_names))]
+            result['ci_upper'] = [float(ci[i, 1]) for i in range(len(const_names))]
+    except Exception as e:
+        return jsonify({'error': f'Model failed: {str(e)}'}), 400
+
+    return jsonify(result)
+
+
+@app.route('/api/vif', methods=['POST'])
+def run_vif():
+    """Compute VIF for the same predictor set as regression (no standardization)."""
+    data = request.get_json() or {}
+    filename = data.get('filename')
+    target = data.get('target')
+    covariates = data.get('covariates') or []
+    controls = data.get('controls') or []
+
+    if not filename or not allowed_file(filename):
+        return jsonify({'error': 'Valid filename required'}), 400
+    if not target:
+        return jsonify({'error': 'Target variable is required'}), 400
+
+    path = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(filename))
+    if not os.path.isfile(path):
+        return jsonify({'error': 'File not found'}), 404
+
+    try:
+        df = pd.read_csv(path)
+    except Exception as e:
+        return jsonify({'error': f'Failed to load CSV: {str(e)}'}), 400
+
+    if target not in df.columns:
+        return jsonify({'error': f'Target column "{target}" not found'}), 400
+
+    cov_cols = [c for c in covariates if c in df.columns and c != target]
+    control_cols = [c for c in controls if c in df.columns and c != target]
+    all_pred_cols = list(dict.fromkeys(cov_cols + control_cols))
+    if not all_pred_cols:
+        return jsonify({'error': 'Select at least one covariate or control variable'}), 400
+
+    all_pred_cols = [target] + all_pred_cols
+    X_df, y_series, feature_names = _prepare_regression_data(df, target, all_pred_cols)
+    if X_df is None or len(X_df) < 2:
+        return jsonify({'error': 'Need at least one predictor'}), 400
+
+    X = X_df.values.astype(float)
+    mask = ~np.isnan(X).any(axis=1)
+    X = X[mask]
+    if len(X) < 2:
+        return jsonify({'error': 'Too few rows after removing missing values'}), 400
+
+    X_const = sm.add_constant(X, has_constant='add')
+    vif_values = []
+    for j in range(1, X_const.shape[1]):
+        try:
+            v = float(variance_inflation_factor(X_const, j))
+            vif_values.append(v if np.isfinite(v) else None)
+        except Exception:
+            vif_values.append(None)
+
+    return jsonify({
+        'success': True,
+        'feature_names': feature_names,
+        'vif': vif_values,
+    })
+
+
+def _build_interpretation_text(reg):
+    """Build interpretation paragraph text from regression result dict."""
+    if not reg or not reg.get('coefficient_labels'):
+        return ''
+    labels = reg.get('coefficient_labels', [])
+    coefs = reg.get('coefficients', [])
+    pvalues = reg.get('pvalues', [])
+    pvalue_labels = reg.get('pvalue_labels', [])
+    cov_names = set(reg.get('covariate_names', []))
+    target = reg.get('target', 'target')
+    model_type = reg.get('model_type', 'linear')
+
+    def is_cov(name):
+        return name in cov_names or any(str(name).startswith(str(c) + '_') for c in cov_names)
+
+    lines = []
+    lines.append('Key predictors (standardized) were ranked by relative importance (|β|). ')
+    covariate_features = [(labels[i], coefs[i], pvalues[i + 1] if i + 1 < len(pvalues) else None) for i in range(len(labels)) if is_cov(labels[i])]
+    covariate_features.sort(key=lambda x: abs(x[1]), reverse=True)
+    for name, coef, p in covariate_features:
+        sig = ' (p < 0.05)' if p is not None and p < 0.05 else ' (not significant)'
+        lines.append('{}: β = {:.4f}{}. '.format(name, coef, sig))
+    control_features = [(labels[i], coefs[i], pvalues[i + 1] if i + 1 < len(pvalues) else None) for i in range(len(labels)) if not is_cov(labels[i])]
+    if control_features:
+        sig_controls = [x[0] for x in control_features if x[2] is not None and x[2] < 0.05]
+        if sig_controls:
+            lines.append('Among control variables, {} were significant. '.format(', '.join(sig_controls)))
+        else:
+            lines.append('No control variables were significant at p < 0.05.')
+    return ' '.join(lines)
+
+
+@app.route('/api/export-report', methods=['POST', 'OPTIONS'])
+def export_report():
+    """Generate a PDF report: data preview, binned variables, correlation, method overview, regression output + interpretation."""
+    if request.method == 'OPTIONS':
+        return '', 204
+
+    data = request.get_json(silent=True) or {}
+    filename = data.get('filename')
+    binned_columns = data.get('binned_columns') or []
+    binned_metadata = data.get('binned_metadata') or {}  # { "col_binned": { "edges": [...], "labels": [...] } }
+    regression_result = data.get('regression_result')
+
+    if not filename or not allowed_file(filename):
+        return jsonify({'error': 'Valid filename required'}), 400
+
+    path = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(filename))
+    if not os.path.isfile(path):
+        return jsonify({'error': 'File not found'}), 404
+
+    try:
+        df = pd.read_csv(path)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 400
+
+    try:
+        buf = io.BytesIO()
+        doc = SimpleDocTemplate(buf, pagesize=letter, rightMargin=0.75*inch, leftMargin=0.75*inch, topMargin=0.75*inch, bottomMargin=0.75*inch)
+        styles = getSampleStyleSheet()
+        story = []
+        # Table width to fit within margins (letter width 8.5in, margins 1.5in total)
+        table_width_pt = (8.5 - 1.5) * 72
+        table_font_size = 6
+
+        # Title and timestamp
+        story.append(Paragraph('CSAT Regression – Analysis Report', styles['Title']))
+        story.append(Spacer(1, 0.2*inch))
+        ts = datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')
+        story.append(Paragraph('Analysis timestamp: {}'.format(ts), styles['Normal']))
+        story.append(Spacer(1, 0.3*inch))
+
+        # 1. Data preview – fit table to page, smaller font, truncate cells
+        story.append(Paragraph('1. Data preview', styles['Heading2']))
+        preview_df = df.head(20)
+        ncols = len(preview_df.columns)
+        col_width_pt = max(20, table_width_pt / ncols) if ncols else table_width_pt
+        col_widths = [col_width_pt] * ncols
+        cell_max = 10
+        preview_data = [[str(c)[:cell_max] for c in preview_df.columns]]
+        for _, row in preview_df.iterrows():
+            preview_data.append([str(row[c])[:cell_max] if pd.notna(row[c]) else '' for c in preview_df.columns])
+        t = Table(preview_data, colWidths=col_widths, repeatRows=1)
+        t.setStyle(TableStyle([
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), table_font_size),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+        ]))
+        story.append(t)
+        story.append(Spacer(1, 0.25*inch))
+
+        # 2. Variables created / binned (include bin edges and labels when available)
+        story.append(Paragraph('2. Variables created / binned', styles['Heading2']))
+        if binned_columns:
+            for col in binned_columns:
+                meta = binned_metadata.get(col) if isinstance(binned_metadata, dict) else None
+                if meta and isinstance(meta, dict):
+                    edges = meta.get('edges', [])
+                    labels = meta.get('labels', [])
+                    edges_str = ', '.join(str(x) for x in edges) if edges else '—'
+                    labels_str = ', '.join(str(x) for x in labels) if labels else '—'
+                    story.append(Paragraph('• <b>{}</b>: edges [{}]; labels [{}].'.format(col, edges_str, labels_str), styles['Normal']))
+                else:
+                    story.append(Paragraph('• {}'.format(col), styles['Normal']))
+        else:
+            story.append(Paragraph('None.', styles['Normal']))
+        story.append(Spacer(1, 0.25*inch))
+
+        # 3. Correlation matrix – fit to page, smaller font
+        story.append(Paragraph('3. Correlation matrix', styles['Heading2']))
+        numeric_cols = _get_numeric_columns(df)
+        if len(numeric_cols) >= 2:
+            corr = df[numeric_cols].corr()
+            corr_arr = np.asarray(corr)
+            ncorr = len(corr.columns) + 1
+            cw = max(18, table_width_pt / ncorr)
+            col_widths_corr = [cw] * ncorr
+            corr_data = [[''] + [str(c)[:12] for c in corr.columns]]
+            for i, r in enumerate(corr.index):
+                row_vals = [str(round(float(corr_arr[i, j]), 2)) if np.isfinite(corr_arr[i, j]) else '' for j in range(len(corr.columns))]
+                corr_data.append([str(r)[:12]] + row_vals)
+            t = Table(corr_data, colWidths=col_widths_corr, repeatRows=1)
+            t.setStyle(TableStyle([
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, -1), table_font_size),
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+            ]))
+            story.append(t)
+        else:
+            story.append(Paragraph('Fewer than 2 numeric columns; correlation matrix omitted.', styles['Normal']))
+        story.append(Spacer(1, 0.25*inch))
+
+        # 4. Regression method overview
+        story.append(Paragraph('4. Regression analysis method', styles['Heading2']))
+        method_text = 'Regression was run with target and predictor variables. Key predictors (covariates) were standardized (z-score) so coefficients are per 1 SD increase and comparable for relative importance. Control variables were included in original units. Model type was chosen from the target: linear regression for continuous targets, logistic regression for binary targets.'
+        if regression_result:
+            model_type = regression_result.get('model_type', 'linear')
+            target = regression_result.get('target', '')
+            n_obs = regression_result.get('n_obs', 0)
+            method_text = '{} regression of {} (N = {}). Key predictors were standardized (1 SD unit); control variables in original units.'.format(model_type.capitalize(), target, n_obs) + ' ' + method_text
+        story.append(Paragraph(method_text, styles['Normal']))
+        story.append(Spacer(1, 0.25*inch))
+
+        # 5. Regression output + interpretation
+        story.append(Paragraph('5. Regression output and interpretation', styles['Heading2']))
+        if regression_result:
+            labels = regression_result.get('coefficient_labels', [])
+            coefs = regression_result.get('coefficients', [])
+            pvalues = regression_result.get('pvalues', [])
+            bse = regression_result.get('bse', [])
+            ci_lower = regression_result.get('ci_lower', [])
+            ci_upper = regression_result.get('ci_upper', [])
+            const_names = regression_result.get('pvalue_labels', ['const'] + labels)
+
+            coef_data = [['Variable', 'Coef', 'SE', 'p-value', '95% CI']]
+            coef_data.append(['(Intercept)', _fmt(regression_result.get('intercept')), _fmt(bse[0] if len(bse) > 0 else None), _fmt_p(pvalues[0] if len(pvalues) > 0 else None), _fmt_ci(ci_lower[0] if len(ci_lower) > 0 else None, ci_upper[0] if len(ci_upper) > 0 else None)])
+            for i in range(len(labels)):
+                p = pvalues[i + 1] if i + 1 < len(pvalues) else None
+                se = bse[i + 1] if i + 1 < len(bse) else None
+                lo = ci_lower[i + 1] if i + 1 < len(ci_lower) else None
+                hi = ci_upper[i + 1] if i + 1 < len(ci_upper) else None
+                coef_data.append([str(labels[i])[:25], _fmt(coefs[i]), _fmt(se), _fmt_p(p), _fmt_ci(lo, hi)])
+            cw5 = table_width_pt / 5
+            col_widths_coef = [cw5 * 1.8, cw5 * 0.9, cw5 * 0.9, cw5 * 0.9, cw5 * 1.3]
+            t = Table(coef_data, colWidths=col_widths_coef, repeatRows=1)
+            t.setStyle(TableStyle([
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, -1), table_font_size),
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+            ]))
+            story.append(t)
+            story.append(Spacer(1, 0.15*inch))
+            if regression_result.get('model_type') == 'linear':
+                story.append(Paragraph('R² = {}; RMSE = {}.'.format(_fmt(regression_result.get('r2')), _fmt(regression_result.get('rmse'))), styles['Normal']))
+            else:
+                story.append(Paragraph('Accuracy = {}.'.format(_fmt(regression_result.get('accuracy'))), styles['Normal']))
+            story.append(Spacer(1, 0.15*inch))
+            interp = _build_interpretation_text(regression_result)
+            if interp:
+                story.append(Paragraph('<b>Interpretation:</b> {}'.format(interp), styles['Normal']))
+        else:
+            story.append(Paragraph('No regression was run for this report. Run regression in the app and export again to include results.', styles['Normal']))
+
+        doc.build(story)
+        buf.seek(0)
+        fname = 'CSAT_Regression_Report_{}.pdf'.format(datetime.utcnow().strftime('%Y%m%d_%H%M'))
+        return send_file(buf, mimetype='application/pdf', as_attachment=True, download_name=fname)
+    except Exception as e:
+        return jsonify({'error': 'PDF generation failed: {}'.format(str(e))}), 500
+
+
+def _fmt(v):
+    if v is None or (isinstance(v, float) and np.isnan(v)):
+        return '—'
+    if isinstance(v, float):
+        return '{:.4f}'.format(v)
+    return str(v)
+
+
+def _fmt_p(p):
+    if p is None or (isinstance(p, float) and np.isnan(p)):
+        return '—'
+    if p < 0.001:
+        return '<0.001'
+    return '{:.4f}'.format(p)
+
+
+def _fmt_ci(lo, hi):
+    if lo is None or hi is None:
+        return '—'
+    return '[{:.3f}, {:.3f}]'.format(lo, hi)
+
+
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+    # Use port 8000: macOS Monterey+ reserves 5000/7000 for AirPlay (causes 403 if Flask uses 5000)
+    app.run(debug=True, host='127.0.0.1', port=8000)

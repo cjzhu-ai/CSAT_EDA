@@ -52,6 +52,12 @@ body {
     font-size: 1rem;
 }
 
+.disclosure {
+    color: var(--text-secondary);
+    font-size: 0.8125rem;
+    margin-top: 0.35rem;
+}
+
 .card {
     background: var(--bg-secondary);
     border: 1px solid var(--border);
@@ -97,6 +103,15 @@ body {
     padding-top: 2rem;
     color: var(--text-secondary);
     font-size: 0.875rem;
+}
+
+.app-footer a {
+    color: var(--accent);
+    text-decoration: none;
+}
+
+.app-footer a:hover {
+    text-decoration: underline;
 }
 
 /* Data preview tables */
@@ -318,4 +333,284 @@ body {
     border-radius: 8px;
     padding: 0.75rem;
     overflow: hidden;
+}
+
+/* Content tabs */
+.content-tabs {
+    display: flex;
+    gap: 0;
+    margin-bottom: 1rem;
+    border-bottom: 1px solid var(--border);
+}
+
+.content-tabs .tab-btn {
+    padding: 0.6rem 1.2rem;
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--text-secondary);
+    font-size: 0.9375rem;
+    font-weight: 500;
+    cursor: pointer;
+    margin-bottom: -1px;
+}
+
+.content-tabs .tab-btn:hover {
+    color: var(--text-primary);
+}
+
+.content-tabs .tab-btn.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+}
+
+.tab-panel {
+    display: none;
+}
+
+.tab-panel.active {
+    display: block;
+}
+
+/* Regression section */
+.regression-section {
+    margin-top: 1.5rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--border);
+}
+
+.regression-section h3 {
+    font-size: 1rem;
+    font-weight: 600;
+    margin: 0 0 0.5rem;
+    color: var(--text-primary);
+}
+
+.data-loaded-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    flex-wrap: wrap;
+    margin-bottom: 0.5rem;
+}
+
+.data-loaded-row h2 {
+    margin: 0;
+    font-size: 1.125rem;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.export-pdf-btn {
+    padding: 0.5rem 1rem;
+    background: var(--accent);
+    color: var(--bg-primary);
+    border: none;
+    border-radius: 6px;
+    font-size: 0.875rem;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.export-pdf-btn:hover {
+    background: var(--accent-hover);
+}
+
+.tab-panel h2 {
+    font-size: 1.125rem;
+    font-weight: 600;
+    margin: 0 0 0.5rem;
+    color: var(--text-primary);
+}
+
+.regression-form {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem;
+    align-items: flex-end;
+    margin-bottom: 1rem;
+}
+
+.regression-form label {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    font-size: 0.875rem;
+    color: var(--text-secondary);
+}
+
+.regression-form select {
+    padding: 0.4rem 0.6rem;
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text-primary);
+    min-width: 160px;
+}
+
+.regression-form select[multiple] {
+    min-width: 200px;
+    min-height: 100px;
+}
+
+.regression-form .form-hint {
+    width: 100%;
+    margin: -0.5rem 0 0;
+    font-size: 0.8125rem;
+    color: var(--text-secondary);
+}
+
+.regression-form button {
+    padding: 0.5rem 1rem;
+    background: var(--accent);
+    color: var(--bg-primary);
+    border: none;
+    border-radius: 6px;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.regression-form button:hover {
+    background: var(--accent-hover);
+}
+
+.regression-results {
+    margin-top: 1rem;
+}
+
+.regression-results h4 {
+    font-size: 0.9375rem;
+    font-weight: 600;
+    margin: 1rem 0 0.5rem;
+    color: var(--text-primary);
+}
+
+.regression-results h4:first-of-type {
+    margin-top: 0;
+}
+
+.covariate-row {
+    background: rgba(56, 189, 248, 0.08);
+}
+
+.covariate-tag {
+    font-size: 0.75rem;
+    color: var(--accent);
+    font-weight: 500;
+    margin-left: 0.25rem;
+}
+
+.sig-legend {
+    font-size: 0.8125rem;
+    color: var(--text-secondary);
+    margin-top: 0.5rem;
+}
+
+.standardized-note {
+    font-size: 0.875rem;
+    color: var(--accent);
+    margin-top: 0.25rem;
+}
+
+.vif-section {
+    margin-top: 1rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border);
+}
+
+.vif-btn {
+    padding: 0.5rem 1rem;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text-primary);
+    font-size: 0.875rem;
+    font-weight: 500;
+    cursor: pointer;
+}
+
+.vif-btn:hover {
+    background: var(--border);
+}
+
+.vif-results {
+    margin-top: 0.75rem;
+}
+
+.vif-results h4 {
+    font-size: 0.9375rem;
+    font-weight: 600;
+    margin: 0 0 0.5rem;
+    color: var(--text-primary);
+}
+
+.vif-legend {
+    font-size: 0.8125rem;
+    color: var(--text-secondary);
+    margin-bottom: 0.5rem;
+}
+
+.vif-high {
+    color: #f87171;
+    font-weight: 500;
+}
+
+.vif-moderate {
+    color: #fbbf24;
+    font-weight: 500;
+}
+
+.interpretation-section {
+    margin-top: 1.5rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border);
+}
+
+.interpretation-section h4 {
+    font-size: 0.9375rem;
+    font-weight: 600;
+    margin: 0 0 0.5rem;
+    color: var(--text-primary);
+}
+
+.interpretation-section h5 {
+    font-size: 0.875rem;
+    font-weight: 600;
+    margin: 1rem 0 0.35rem;
+    color: var(--text-primary);
+}
+
+.interpretation-section h5:first-of-type {
+    margin-top: 0.5rem;
+}
+
+.interpretation-tutorial {
+    color: var(--text-secondary);
+    font-size: 0.9375rem;
+    line-height: 1.55;
+    margin-bottom: 0.75rem;
+    padding: 0.5rem 0.75rem;
+    background: rgba(56, 189, 248, 0.06);
+    border-left: 3px solid var(--accent);
+    border-radius: 0 6px 6px 0;
+}
+
+.interpretation-summary {
+    color: var(--text-secondary);
+    font-size: 0.9375rem;
+    line-height: 1.5;
+    margin-bottom: 0.5rem;
+}
+
+.interpretation-bullets {
+    margin: 0 0 0 1.25rem;
+    padding: 0;
+    color: var(--text-secondary);
+    font-size: 0.9375rem;
+    line-height: 1.6;
+}
+
+.interpretation-bullets li {
+    margin-bottom: 0.35rem;
 }
