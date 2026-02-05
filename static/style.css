@@ -335,6 +335,16 @@ body {
     overflow: hidden;
 }
 
+/* Correlation matrix: allow overflow so Plotly toolbar and zoom work */
+.corr-chart-container {
+    overflow: visible;
+    min-height: 420px;
+}
+
+.corr-chart-container .svg-container {
+    overflow: visible;
+}
+
 /* Content tabs */
 .content-tabs {
     display: flex;
@@ -424,6 +434,158 @@ body {
     color: var(--text-primary);
 }
 
+.regression-intro {
+    font-size: 0.9375rem;
+    color: var(--text-secondary);
+    margin-bottom: 1.25rem;
+}
+
+.regression-section {
+    margin-bottom: 1.5rem;
+    padding: 1rem 0;
+    border-top: 1px solid var(--border);
+}
+
+.regression-section:first-of-type {
+    border-top: none;
+    padding-top: 0;
+}
+
+.regression-section h3 {
+    font-size: 1rem;
+    font-weight: 600;
+    margin: 0 0 0.75rem;
+    color: var(--text-primary);
+}
+
+.regression-section .form-hint {
+    width: 100%;
+    margin: -0.5rem 0 0.5rem;
+    font-size: 0.8125rem;
+    color: var(--text-secondary);
+}
+
+.reg-filters-block {
+    margin-top: 1rem;
+}
+
+.reg-filters-title,
+.reg-filters-block h4 {
+    font-size: 0.9375rem;
+    font-weight: 600;
+    margin: 0 0 0.5rem;
+    color: var(--text-secondary);
+}
+
+.reg-filters-container {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    margin-bottom: 0.75rem;
+}
+
+.reg-filter-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem;
+    align-items: flex-end;
+}
+
+.reg-filter-row label {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    font-size: 0.875rem;
+    color: var(--text-secondary);
+}
+
+.reg-filter-row select {
+    padding: 0.4rem 0.6rem;
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text-primary);
+    min-width: 140px;
+}
+
+.reg-filter-row select[multiple] {
+    min-width: 180px;
+    min-height: 80px;
+}
+
+.reg-filter-exclude-wrap {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.reg-filter-exclude-wrap input {
+    margin: 0;
+}
+
+.reg-filter-remove {
+    padding: 0.35rem 0.75rem;
+    font-size: 0.8125rem;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text-secondary);
+    cursor: pointer;
+}
+
+.reg-filter-remove:hover {
+    background: rgba(248, 113, 113, 0.15);
+    color: var(--text-primary);
+}
+
+.reg-add-filter-btn {
+    padding: 0.4rem 0.9rem;
+    font-size: 0.875rem;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text-primary);
+    cursor: pointer;
+}
+
+.reg-add-filter-btn:hover {
+    background: var(--border);
+}
+
+.reg-section-results .reg-run-btn {
+    padding: 0.5rem 1.25rem;
+    background: var(--accent);
+    color: var(--bg-primary);
+    border: none;
+    border-radius: 6px;
+    font-weight: 600;
+    cursor: pointer;
+    margin-bottom: 1rem;
+}
+
+.reg-section-results .reg-run-btn:hover {
+    background: var(--accent-hover);
+}
+
+.regression-section .regression-impute-row {
+    width: 100%;
+}
+
+.regression-section .reg-impute-check-wrap {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.regression-section .reg-impute-options {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem;
+    align-items: flex-end;
+    margin-top: 0.5rem;
+    margin-left: 1.5rem;
+}
+
 .regression-form {
     display: flex;
     flex-wrap: wrap;
@@ -459,6 +621,29 @@ body {
     margin: -0.5rem 0 0;
     font-size: 0.8125rem;
     color: var(--text-secondary);
+}
+
+.regression-form .regression-impute-row {
+    width: 100%;
+}
+
+.regression-form .reg-impute-check-wrap {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.regression-form .reg-impute-check-wrap input[type="checkbox"] {
+    margin: 0;
+}
+
+.regression-form .reg-impute-options {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem;
+    align-items: flex-end;
+    margin-top: 0.5rem;
+    margin-left: 1.5rem;
 }
 
 .regression-form button {
@@ -507,7 +692,8 @@ body {
     margin-top: 0.5rem;
 }
 
-.standardized-note {
+.standardized-note,
+.subgroup-note {
     font-size: 0.875rem;
     color: var(--accent);
     margin-top: 0.25rem;
@@ -532,6 +718,37 @@ body {
 
 .vif-btn:hover {
     background: var(--border);
+}
+
+.relative-importance-section {
+    margin-top: 1rem;
+    padding-top: 1rem;
+    border-top: 1px solid var(--border);
+}
+
+.rel-importance-form {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem;
+    align-items: center;
+    margin-bottom: 0.5rem;
+}
+
+.rel-importance-form label {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.875rem;
+    color: var(--text-secondary);
+}
+
+.rel-importance-form select {
+    padding: 0.4rem 0.6rem;
+    background: var(--bg-primary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text-primary);
+    min-width: 240px;
 }
 
 .vif-results {

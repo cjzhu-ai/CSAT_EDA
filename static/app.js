@@ -139,15 +139,48 @@ document.addEventListener('DOMContentLoaded', () => {
             </div>
             <div id="tabRegression" class="tab-panel">
                 <h2>Regression</h2>
-                <p>Specify target, covariates (key predictors to focus on), and control variables. Model type is chosen automatically: linear for continuous targets, logistic for binary.</p>
-                <div class="regression-form">
-                    <label>Target variable <select id="regTarget"><option value="">-- Select target --</option>${data.columns.map(c => `<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)}</option>`).join('')}</select></label>
-                    <label>Covariates (key predictors) <select id="regCovariates" multiple size="5">${data.columns.map(c => `<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)}</option>`).join('')}</select></label>
-                    <label>Control variables <select id="regControls" multiple size="5">${data.columns.map(c => `<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)}</option>`).join('')}</select></label>
-                    <p class="form-hint">Hold Ctrl/Cmd to select multiple. Covariates + controls form the full predictor set.</p>
-                    <button type="button" id="regRun">Run regression</button>
-                </div>
-                <div id="regressionResults" class="regression-results"></div>
+                <p class="regression-intro">Specify target, covariates (key predictors), and control variables. Optionally add subgroup filters and imputation. Model type is chosen automatically: linear for continuous targets, logistic for binary.</p>
+
+                <section class="regression-section reg-section-variables">
+                    <h3>1. Select variables and filters</h3>
+                    <div class="regression-form">
+                        <label>Target variable <select id="regTarget"><option value="">-- Select target --</option>${data.columns.map(c => `<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)}</option>`).join('')}</select></label>
+                        <label>Covariates (key predictors) <select id="regCovariates" multiple size="5">${data.columns.map(c => `<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)}</option>`).join('')}</select></label>
+                        <label>Control variables <select id="regControls" multiple size="5">${data.columns.map(c => `<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)}</option>`).join('')}</select></label>
+                        <p class="form-hint">Hold Ctrl/Cmd to select multiple. Covariates + controls form the full predictor set.</p>
+                    </div>
+                    <div class="reg-filters-block">
+                        <h4 class="reg-filters-title">Subgroup filters</h4>
+                        <p class="form-hint">Restrict to rows where each column equals one of the chosen values. Optionally exclude rows where the filter column is missing.</p>
+                        <div id="regFiltersContainer" class="reg-filters-container">
+                            <div class="reg-filter-row">
+                                <label>Column <select class="reg-filter-col"><option value="">— No filter —</option>${data.columns.map(c => `<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)}</option>`).join('')}</select></label>
+                                <label>Values <select class="reg-filter-vals" multiple size="4" disabled><option value="">— Select column first —</option></select></label>
+                                <label class="reg-filter-exclude-wrap"><input type="checkbox" class="reg-filter-exclude-na"> Exclude NA</label>
+                                <button type="button" class="reg-filter-remove" aria-label="Remove filter">Remove</button>
+                            </div>
+                        </div>
+                        <button type="button" id="regAddFilter" class="reg-add-filter-btn">Add filter</button>
+                    </div>
+                </section>
+
+                <section class="regression-section reg-section-imputation">
+                    <h3>2. Missing data imputation</h3>
+                    <div class="regression-impute-row">
+                        <label class="reg-impute-check-wrap"><input type="checkbox" id="regImputeCheck"> Impute missing values in predictors</label>
+                        <div id="regImputeOptions" class="reg-impute-options" style="display: none;">
+                            <label>Numeric strategy <select id="regImputeNumeric"><option value="median" selected>median (default)</option><option value="mean">mean</option></select></label>
+                            <label>Categorical strategy <select id="regImputeCategorical"><option value="most_frequent" selected>most_frequent (default)</option></select></label>
+                        </div>
+                    </div>
+                    <p class="form-hint">If enabled: missing values in covariates and controls are filled before regression (target missing still drops the row).</p>
+                </section>
+
+                <section class="regression-section reg-section-results">
+                    <h3>3. Results</h3>
+                    <button type="button" id="regRun" class="reg-run-btn">Run regression</button>
+                    <div id="regressionResults" class="regression-results"></div>
+                </section>
             </div>
             <div id="tabReport" class="tab-panel">
                 <h2>Export report</h2>
@@ -170,6 +203,66 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const regRun = document.getElementById('regRun');
         if (regRun) regRun.addEventListener('click', loadRegression);
+
+        const regImputeCheck = document.getElementById('regImputeCheck');
+        const regImputeOptions = document.getElementById('regImputeOptions');
+        if (regImputeCheck && regImputeOptions) {
+            regImputeCheck.addEventListener('change', () => {
+                regImputeOptions.style.display = regImputeCheck.checked ? 'flex' : 'none';
+            });
+        }
+
+        const regFiltersContainer = document.getElementById('regFiltersContainer');
+        if (regFiltersContainer) {
+            regFiltersContainer.addEventListener('change', async (e) => {
+                if (!e.target.classList.contains('reg-filter-col')) return;
+                const row = e.target.closest('.reg-filter-row');
+                if (!row || !currentFilename) return;
+                const colSelect = row.querySelector('.reg-filter-col');
+                const valsSelect = row.querySelector('.reg-filter-vals');
+                if (!valsSelect) return;
+                const col = colSelect?.value;
+                valsSelect.innerHTML = '';
+                valsSelect.disabled = true;
+                if (!col) return;
+                try {
+                    const res = await fetch('/api/column-values', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ filename: currentFilename, column: col }),
+                    });
+                    const data = await res.json();
+                    if (!res.ok) throw new Error(data.error || 'Failed to load values');
+                    const values = data.values || [];
+                    valsSelect.innerHTML = values.map(v => `<option value="${escapeHtml(String(v))}">${escapeHtml(String(v))}</option>`).join('');
+                    valsSelect.disabled = false;
+                } catch (err) {
+                    valsSelect.innerHTML = '<option value="">' + escapeHtml(err.message) + '</option>';
+                }
+            });
+            regFiltersContainer.addEventListener('click', (e) => {
+                if (!e.target.classList.contains('reg-filter-remove')) return;
+                const row = e.target.closest('.reg-filter-row');
+                if (!row) return;
+                const rows = regFiltersContainer.querySelectorAll('.reg-filter-row');
+                if (rows.length > 1) row.remove();
+            });
+        }
+
+        const regAddFilter = document.getElementById('regAddFilter');
+        if (regAddFilter && regFiltersContainer) {
+            regAddFilter.addEventListener('click', () => {
+                const first = regFiltersContainer.querySelector('.reg-filter-row');
+                if (!first) return;
+                const clone = first.cloneNode(true);
+                clone.querySelector('.reg-filter-col').value = '';
+                const v = clone.querySelector('.reg-filter-vals');
+                v.innerHTML = '<option value="">— Select column first —</option>';
+                v.disabled = true;
+                clone.querySelector('.reg-filter-exclude-na').checked = false;
+                regFiltersContainer.appendChild(clone);
+            });
+        }
 
         const exportPdfBtn = document.getElementById('exportPdfBtn');
         if (exportPdfBtn) exportPdfBtn.addEventListener('click', exportReport);
@@ -317,6 +410,22 @@ document.addEventListener('DOMContentLoaded', () => {
                 const cur = new Set(Array.from(regControls.selectedOptions).map(o => o.value));
                 regControls.innerHTML = allColOptions;
                 Array.from(regControls.options).forEach(o => { if (cur.has(o.value)) o.selected = true; });
+            }
+            const regFiltersContainer = document.getElementById('regFiltersContainer');
+            if (regFiltersContainer) {
+                regFiltersContainer.querySelectorAll('.reg-filter-row').forEach(row => {
+                    const colSelect = row.querySelector('.reg-filter-col');
+                    const valsSelect = row.querySelector('.reg-filter-vals');
+                    if (colSelect) {
+                        const cur = colSelect.value;
+                        colSelect.innerHTML = '<option value="">— No filter —</option>' + allColOptions;
+                        if (cur) colSelect.value = cur;
+                    }
+                    if (valsSelect) {
+                        valsSelect.innerHTML = '<option value="">— Select column first —</option>';
+                        valsSelect.disabled = true;
+                    }
+                });
             }
 
             // Refresh EDA (includes distribution columns) and distribution dropdown
@@ -466,7 +575,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         if (data.correlation_chart) {
-            html += '<h4>Correlation matrix</h4><div id="corrChartContainer" class="chart-cell"></div>';
+            html += '<h4>Correlation matrix</h4><div id="corrChartContainer" class="chart-cell corr-chart-container"></div>';
         }
 
         if (!data.stats?.length && !allCols.length && !data.correlation_chart) {
@@ -480,7 +589,12 @@ document.addEventListener('DOMContentLoaded', () => {
         if (corrContainer && data.correlation_chart && typeof Plotly !== 'undefined') {
             try {
                 const spec = typeof data.correlation_chart === 'string' ? JSON.parse(data.correlation_chart) : data.correlation_chart;
-                Plotly.newPlot(corrContainer, spec.data, spec.layout, { responsive: true });
+                Plotly.newPlot(corrContainer, spec.data, spec.layout, {
+                    responsive: true,
+                    scrollZoom: true,
+                    displayModeBar: true,
+                    modeBarButtonsToAdd: ['zoomIn2d', 'zoomOut2d', 'autoScale2d', 'resetScale2d'],
+                });
             } catch (e) {
                 corrContainer.innerHTML = '<p class="bin-error">Failed to render correlation chart.</p>';
             }
@@ -518,18 +632,36 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
+        const filters = [];
+        const filterRows = document.querySelectorAll('#regFiltersContainer .reg-filter-row');
+        filterRows.forEach(row => {
+            const col = row.querySelector('.reg-filter-col')?.value;
+            const valsEl = row.querySelector('.reg-filter-vals');
+            const vals = col && valsEl && !valsEl.disabled ? Array.from(valsEl.selectedOptions).map(o => o.value).filter(Boolean) : [];
+            const excludeNa = row.querySelector('.reg-filter-exclude-na')?.checked ?? false;
+            if (col && vals.length > 0) filters.push({ column: col, values: vals, exclude_na: excludeNa });
+        });
+        const payload = {
+            filename: currentFilename,
+            target,
+            covariates,
+            controls,
+        };
+        if (filters.length > 0) payload.filters = filters;
+        const imputeCheck = document.getElementById('regImputeCheck');
+        if (imputeCheck && imputeCheck.checked) {
+            payload.impute_missing = true;
+            payload.impute_numeric_strategy = document.getElementById('regImputeNumeric')?.value || 'median';
+            payload.impute_categorical_strategy = document.getElementById('regImputeCategorical')?.value || 'most_frequent';
+        }
+
         container.innerHTML = '<p class="eda-loading">Running regression...</p>';
 
         try {
             const res = await fetch('/api/regression', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    filename: currentFilename,
-                    target,
-                    covariates,
-                    controls,
-                }),
+                body: JSON.stringify(payload),
             });
             const data = await res.json();
 
@@ -584,6 +716,22 @@ document.addEventListener('DOMContentLoaded', () => {
         if (data.covariates_standardized && covariateNames.length > 0) {
             statsHtml += `<p class="standardized-note">Key predictors are standardized (z-score); coefficients are per 1 SD increase and can be compared for relative importance.</p>`;
         }
+        if (data.y_standardized) {
+            statsHtml += `<p class="standardized-note">Target (${escapeHtml(data.target)}) was also standardized (z-score) so coefficients are in the same scale.</p>`;
+        }
+        const filtersUsed = data.filters_used || [];
+        if (filtersUsed.length > 0) {
+            filtersUsed.forEach(f => {
+                const fc = f.column || '';
+                const fv = (f.values || []).map(v => escapeHtml(String(v))).join(', ');
+                const ex = f.exclude_na ? ' (exclude NA)' : '';
+                statsHtml += `<p class="subgroup-note">Subgroup: <strong>${escapeHtml(fc)}</strong> ∈ { ${fv} }${ex}.</p>`;
+            });
+            statsHtml += `<p class="subgroup-note">N = ${data.n_obs} rows after filters.</p>`;
+        }
+        if (data.impute_used) {
+            statsHtml += `<p class="standardized-note">Missing values in predictors were imputed (numeric: ${escapeHtml(data.impute_numeric_strategy || 'median')}, categorical: ${escapeHtml(data.impute_categorical_strategy || 'most_frequent')}).</p>`;
+        }
 
         const interpretationHtml = buildInterpretation(data, labels, coefs, pvalues, covariateNames);
 
@@ -603,11 +751,87 @@ document.addEventListener('DOMContentLoaded', () => {
                 <button type="button" id="vifRun" class="vif-btn">Run VIF test (multicollinearity)</button>
                 <div id="vifResults" class="vif-results"></div>
             </div>
+            ${data.model_type === 'linear' ? `
+            <div class="relative-importance-section">
+                <h4>Relative importance of predictors</h4>
+                <p class="form-hint">Decompose R² to see how much each predictor contributes to explaining the target. Only for linear regression.</p>
+                <div class="rel-importance-form">
+                    <label>Method <select id="relImportanceMethod">
+                        <option value="shapley" selected>Shapley value (default)</option>
+                        <option value="johnson">Johnson's relative weights</option>
+                        <option value="dominance">Dominance analysis</option>
+                    </select></label>
+                    <button type="button" id="relImportanceRun" class="vif-btn">Run relative importance</button>
+                </div>
+                <div id="relImportanceResults" class="vif-results"></div>
+            </div>
+            ` : ''}
             <div class="interpretation-section">${interpretationHtml}</div>
         `;
 
         const vifRun = document.getElementById('vifRun');
         if (vifRun) vifRun.addEventListener('click', () => runVIF(container));
+
+        const relImportanceRun = document.getElementById('relImportanceRun');
+        if (relImportanceRun) relImportanceRun.addEventListener('click', () => runRelativeImportance(container));
+    }
+
+    async function runRelativeImportance(container) {
+        const resultsEl = document.getElementById('relImportanceResults');
+        if (!resultsEl || !currentFilename) return;
+
+        const target = document.getElementById('regTarget')?.value;
+        const covariatesEl = document.getElementById('regCovariates');
+        const controlsEl = document.getElementById('regControls');
+        const covariates = covariatesEl ? Array.from(covariatesEl.selectedOptions).map(o => o.value).filter(Boolean) : [];
+        const controls = controlsEl ? Array.from(controlsEl.selectedOptions).map(o => o.value).filter(Boolean) : [];
+        if (!target || (!covariates.length && !controls.length)) {
+            resultsEl.innerHTML = '<p class="bin-error">Select target and at least one covariate or control, then run regression first.</p>';
+            return;
+        }
+
+        const filters = [];
+        document.querySelectorAll('#regFiltersContainer .reg-filter-row').forEach(row => {
+            const col = row.querySelector('.reg-filter-col')?.value;
+            const valsEl = row.querySelector('.reg-filter-vals');
+            const vals = col && valsEl && !valsEl.disabled ? Array.from(valsEl.selectedOptions).map(o => o.value).filter(Boolean) : [];
+            const excludeNa = row.querySelector('.reg-filter-exclude-na')?.checked ?? false;
+            if (col && vals.length > 0) filters.push({ column: col, values: vals, exclude_na: excludeNa });
+        });
+        const payload = { filename: currentFilename, target, covariates, controls, method: document.getElementById('relImportanceMethod')?.value || 'shapley' };
+        if (filters.length > 0) payload.filters = filters;
+        const imputeCheck = document.getElementById('regImputeCheck');
+        if (imputeCheck && imputeCheck.checked) {
+            payload.impute_missing = true;
+            payload.impute_numeric_strategy = document.getElementById('regImputeNumeric')?.value || 'median';
+            payload.impute_categorical_strategy = document.getElementById('regImputeCategorical')?.value || 'most_frequent';
+        }
+
+        resultsEl.innerHTML = '<p class="eda-loading">Computing relative importance...</p>';
+        try {
+            const res = await fetch('/api/relative-importance', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || 'Relative importance failed');
+            const rows = (data.importance || []).map(row =>
+                `<tr><td>${escapeHtml(row.name)}</td><td>${Number(row.weight).toFixed(4)}</td><td>${Number(row.pct).toFixed(1)}%</td></tr>`
+            ).join('');
+            resultsEl.innerHTML = `
+                <h4>${escapeHtml(data.method_label || data.method)}</h4>
+                <p>Model R² = ${Number(data.r2).toFixed(4)} &nbsp; N = ${data.n_obs}. Each predictor's contribution sums to R².</p>
+                <div class="preview-table-wrapper">
+                    <table class="column-table">
+                        <thead><tr><th>Predictor</th><th>Contribution to R²</th><th>% of R²</th></tr></thead>
+                        <tbody>${rows}</tbody>
+                    </table>
+                </div>
+            `;
+        } catch (err) {
+            resultsEl.innerHTML = '<p class="bin-error">' + escapeHtml(err.message) + '</p>';
+        }
     }
 
     async function runVIF(container) {
@@ -625,13 +849,24 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
+        const vifFilters = [];
+        document.querySelectorAll('#regFiltersContainer .reg-filter-row').forEach(row => {
+            const col = row.querySelector('.reg-filter-col')?.value;
+            const valsEl = row.querySelector('.reg-filter-vals');
+            const vals = col && valsEl && !valsEl.disabled ? Array.from(valsEl.selectedOptions).map(o => o.value).filter(Boolean) : [];
+            const excludeNa = row.querySelector('.reg-filter-exclude-na')?.checked ?? false;
+            if (col && vals.length > 0) vifFilters.push({ column: col, values: vals, exclude_na: excludeNa });
+        });
+        const vifPayload = { filename: currentFilename, target, covariates, controls };
+        if (vifFilters.length > 0) vifPayload.filters = vifFilters;
+
         vifResults.innerHTML = '<p class="eda-loading">Computing VIF...</p>';
 
         try {
             const res = await fetch('/api/vif', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ filename: currentFilename, target, covariates, controls }),
+                body: JSON.stringify(vifPayload),
             });
             const data = await res.json();
 

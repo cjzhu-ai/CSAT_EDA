@@ -230,6 +230,9 @@ def exploratory_analysis():
         # Correlation heatmap (if 2+ numeric columns)
         if len(numeric_cols) >= 2:
             corr = df[numeric_cols].corr()
+            n_corr = len(numeric_cols)
+            # Smaller text when many columns to avoid overlap
+            text_size = max(8, 12 - n_corr // 4)
             fig = go.Figure(data=go.Heatmap(
                 z=corr.values.tolist(),
                 x=corr.columns.tolist(),
@@ -237,17 +240,22 @@ def exploratory_analysis():
                 colorscale='Blues',
                 text=np.round(corr.values, 2).tolist(),
                 texttemplate='%{text}',
-                textfont={'size': 10},
+                textfont={'size': text_size},
             ))
+            # Margins scale with number of columns for long labels; automargin helps
+            margin_left = min(180, 80 + n_corr * 12)
+            margin_bottom = min(180, 80 + n_corr * 12)
             fig.update_layout(
                 title='Correlation matrix',
                 template='plotly_dark',
                 paper_bgcolor='rgba(0,0,0,0)',
                 plot_bgcolor='rgba(0,0,0,0)',
                 font={'color': '#94a3b8'},
-                margin=dict(l=120, r=40, t=50, b=120),
-                height=300 + len(numeric_cols) * 25,
-                xaxis={'tickangle': -45},
+                margin=dict(l=margin_left, r=50, t=50, b=margin_bottom),
+                height=max(400, 280 + n_corr * 28),
+                xaxis={'tickangle': -45, 'automargin': True, 'tickfont': {'size': max(9, 11 - n_corr // 5)}},
+                yaxis={'automargin': True, 'tickfont': {'size': max(9, 11 - n_corr // 5)}},
+                dragmode='zoom',
             )
             result['correlation_chart'] = fig.to_json()
         else:
@@ -431,6 +439,32 @@ def _is_binary_target(series):
     return len(uniq) == 2
 
 
+def _impute_predictors(df, pred_cols, numeric_strategy='median', categorical_strategy='most_frequent'):
+    """
+    Impute missing values in predictor columns. numeric_strategy: 'median' or 'mean'.
+    categorical_strategy: 'most_frequent'. Modifies a copy of df and returns it.
+    """
+    work = df.copy()
+    for c in pred_cols:
+        if c not in work.columns:
+            continue
+        col = work[c]
+        is_numeric = col.dtype in (np.int64, np.int32, np.float64, np.float32) or (hasattr(col.dtype, 'kind') and col.dtype.kind in 'iufc')
+        if is_numeric:
+            if numeric_strategy == 'mean':
+                work[c] = col.fillna(col.mean())
+            else:
+                work[c] = col.fillna(col.median())
+        else:
+            if categorical_strategy == 'most_frequent':
+                mode_vals = col.dropna().astype(str).mode()
+                fill_val = mode_vals.iloc[0] if len(mode_vals) > 0 else 'missing'
+                work[c] = col.astype(str).fillna(fill_val)
+            else:
+                work[c] = col.astype(str).fillna('missing')
+    return work
+
+
 def _prepare_regression_data(df, target_col, control_cols):
     """
     Build X (design matrix) and y from df. One-hot encode categoricals, drop rows with missing target.
@@ -459,18 +493,53 @@ def _prepare_regression_data(df, target_col, control_cols):
     return X_df, y, feature_names
 
 
+@app.route('/api/column-values', methods=['POST'])
+def column_values():
+    """Return sorted unique values (as strings) for a column. Used for subgroup filter."""
+    data = request.get_json() or {}
+    filename = data.get('filename')
+    column = data.get('column')
+    if not filename or not allowed_file(filename) or not column:
+        return jsonify({'error': 'filename and column required'}), 400
+    path = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(filename))
+    if not os.path.isfile(path):
+        return jsonify({'error': 'File not found'}), 404
+    try:
+        df = pd.read_csv(path)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 400
+    if column not in df.columns:
+        return jsonify({'error': f'Column "{column}" not found'}), 400
+    values = df[column].dropna().astype(str).unique().tolist()
+    values.sort(key=str)
+    return jsonify({'values': values})
+
+
 @app.route('/api/regression', methods=['POST'])
 def run_regression():
     """
     Run linear or logistic regression. Predictors = covariates (key) + controls.
     Model type: numeric with 2 unique values → logistic, else → linear.
-    Uses statsmodels for p-values.
+    Optional subgroup filter: filter_column + filter_values restrict rows before fitting.
+    Linear target y is z-scored; covariates are z-scored. Uses statsmodels for p-values.
     """
     data = request.get_json() or {}
     filename = data.get('filename')
     target = data.get('target')
     covariates = data.get('covariates') or []
     controls = data.get('controls') or []
+    # Filters: accept filters array [{ column, values, exclude_na }, ...] or legacy filter_column, filter_values, filter_exclude_na
+    filters = data.get('filters')
+    if not filters and (data.get('filter_column') or data.get('filter_values')):
+        fc = data.get('filter_column') or ''
+        fv = data.get('filter_values') or []
+        fe = data.get('filter_exclude_na', False)
+        if fc and fv:
+            filters = [{'column': fc, 'values': fv, 'exclude_na': fe}]
+    filters = filters if isinstance(filters, list) else []
+    impute_missing = data.get('impute_missing', False)
+    impute_numeric_strategy = data.get('impute_numeric_strategy', 'median')
+    impute_categorical_strategy = data.get('impute_categorical_strategy', 'most_frequent')
 
     if not filename or not allowed_file(filename):
         return jsonify({'error': 'Valid filename required'}), 400
@@ -489,11 +558,38 @@ def run_regression():
     if target not in df.columns:
         return jsonify({'error': f'Target column "{target}" not found'}), 400
 
+    # Apply subgroup filters (each: optional exclude_na, then restrict to values)
+    for f in filters:
+        col = f.get('column') if isinstance(f, dict) else None
+        vals = f.get('values') if isinstance(f, dict) else []
+        exclude_na = f.get('exclude_na', False) if isinstance(f, dict) else False
+        if not col or col not in df.columns or not vals:
+            continue
+        if exclude_na:
+            # Drop rows where column is null, empty, or string NA/nan/none (case-insensitive)
+            ser = df[col]
+            null_mask = ser.isna()
+            str_ser = ser.astype(str).str.strip().str.lower()
+            na_like = str_ser.isin(['', 'na', 'nan', 'none', '.'])
+            df = df.loc[~(null_mask | na_like)].copy()
+        filter_str = df[col].astype(str)
+        df = df.loc[filter_str.isin([str(v) for v in vals])].copy()
+        if len(df) < 2:
+            return jsonify({'error': 'Too few rows after subgroup filter (need at least 2)'}), 400
+
     cov_cols = [c for c in covariates if c in df.columns and c != target]
     control_cols = [c for c in controls if c in df.columns and c != target]
     all_pred_cols = list(dict.fromkeys(cov_cols + control_cols))
     if not all_pred_cols:
         return jsonify({'error': 'Select at least one covariate or control variable'}), 400
+
+    # Optional imputation of missing values in predictors (target missing still drops row)
+    if impute_missing:
+        if impute_numeric_strategy not in ('median', 'mean'):
+            impute_numeric_strategy = 'median'
+        if impute_categorical_strategy not in ('most_frequent',):
+            impute_categorical_strategy = 'most_frequent'
+        df = _impute_predictors(df, all_pred_cols, numeric_strategy=impute_numeric_strategy, categorical_strategy=impute_categorical_strategy)
 
     all_pred_cols = [target] + all_pred_cols
     X_df, y_series, feature_names = _prepare_regression_data(df, target, all_pred_cols)
@@ -540,6 +636,13 @@ def run_regression():
             model_type = 'logistic'
             y = y.astype(int)
 
+    # Normalize y (z-score) for linear regression so coefficients are in same scale as standardized predictors
+    y_mean, y_std = None, None
+    if model_type == 'linear':
+        y_mean, y_std = float(np.mean(y)), float(np.std(y))
+        if y_std > 1e-10:
+            y = (y - y_mean) / y_std
+
     result = {
         'success': True,
         'model_type': model_type,
@@ -548,7 +651,17 @@ def run_regression():
         'feature_names': feature_names,
         'covariate_names': cov_cols,
         'covariates_standardized': True,
+        'y_standardized': (model_type == 'linear' and y_std is not None and y_std > 1e-10),
     }
+    if filters:
+        result['filters_used'] = [{'column': f.get('column'), 'values': list(f.get('values') or []), 'exclude_na': bool(f.get('exclude_na'))} for f in filters if f.get('column') and f.get('values')]
+    if model_type == 'linear' and y_mean is not None and y_std is not None and y_std > 1e-10:
+        result['y_mean'] = y_mean
+        result['y_std'] = y_std
+    if impute_missing:
+        result['impute_used'] = True
+        result['impute_numeric_strategy'] = impute_numeric_strategy
+        result['impute_categorical_strategy'] = impute_categorical_strategy
 
     def _param(p, i):
         return float(np.asarray(p)[i])
@@ -587,12 +700,20 @@ def run_regression():
 
 @app.route('/api/vif', methods=['POST'])
 def run_vif():
-    """Compute VIF for the same predictor set as regression (no standardization)."""
+    """Compute VIF for the same predictor set as regression (no standardization). Accepts same subgroup filter as regression."""
     data = request.get_json() or {}
     filename = data.get('filename')
     target = data.get('target')
     covariates = data.get('covariates') or []
     controls = data.get('controls') or []
+    vif_filters = data.get('filters')
+    if not vif_filters and (data.get('filter_column') or data.get('filter_values')):
+        fc = data.get('filter_column') or ''
+        fv = data.get('filter_values') or []
+        fe = data.get('filter_exclude_na', False)
+        if fc and fv:
+            vif_filters = [{'column': fc, 'values': fv, 'exclude_na': fe}]
+    vif_filters = vif_filters if isinstance(vif_filters, list) else []
 
     if not filename or not allowed_file(filename):
         return jsonify({'error': 'Valid filename required'}), 400
@@ -610,6 +731,21 @@ def run_vif():
 
     if target not in df.columns:
         return jsonify({'error': f'Target column "{target}" not found'}), 400
+
+    for f in vif_filters:
+        col = f.get('column') if isinstance(f, dict) else None
+        vals = f.get('values') if isinstance(f, dict) else []
+        exclude_na = f.get('exclude_na', False) if isinstance(f, dict) else False
+        if not col or col not in df.columns or not vals:
+            continue
+        if exclude_na:
+            ser = df[col]
+            null_mask = ser.isna()
+            str_ser = ser.astype(str).str.strip().str.lower()
+            na_like = str_ser.isin(['', 'na', 'nan', 'none', '.'])
+            df = df.loc[~(null_mask | na_like)].copy()
+        filter_str = df[col].astype(str)
+        df = df.loc[filter_str.isin([str(v) for v in vals])].copy()
 
     cov_cols = [c for c in covariates if c in df.columns and c != target]
     control_cols = [c for c in controls if c in df.columns and c != target]
@@ -641,6 +777,199 @@ def run_vif():
         'success': True,
         'feature_names': feature_names,
         'vif': vif_values,
+    })
+
+
+def _johnson_relative_weights(X, y, feature_names, r2):
+    """Johnson's relative weights: orthogonalize via R = P Lambda P', epsilon = Lambda^(-1/2) P' r, weight_j = sum_k (P[j,k]*epsilon_k)^2."""
+    n, p = X.shape
+    if p == 0 or n < 3:
+        return []
+    R = (X.T @ X) / (n - 1)
+    r = (X.T @ y).ravel() / (n - 1)
+    try:
+        eigvals, eigvecs = np.linalg.eigh(R)
+        eigvals = np.maximum(eigvals, 1e-10)
+        Lambda_inv_sqrt = 1.0 / np.sqrt(eigvals)
+        epsilon = Lambda_inv_sqrt * (eigvecs.T @ r)
+        raw = np.zeros(p)
+        for j in range(p):
+            raw[j] = np.sum((eigvecs[j, :] * epsilon) ** 2)
+        total = float(np.sum(raw))
+        if total < 1e-12:
+            return [{'name': feature_names[j], 'weight': 0.0, 'pct': 0.0} for j in range(p)]
+        scale = r2 / total
+        weights = raw * scale
+        pct_scale = 100.0 / r2 if r2 > 1e-12 else 0
+        return [
+            {'name': feature_names[j], 'weight': float(weights[j]), 'pct': float(weights[j] * pct_scale)}
+            for j in range(p)
+        ]
+    except Exception:
+        return [{'name': feature_names[j], 'weight': 0.0, 'pct': 0.0} for j in range(p)]
+
+
+def _shapley_or_dominance_incremental_r2(X, y, feature_names, r2_full, n_permutations=120):
+    """Approximate Shapley (LMG) / general dominance: average incremental R² over random orderings."""
+    n, p = X.shape
+    if p == 0 or n < 3:
+        return []
+    X_const = sm.add_constant(X, has_constant='add')
+    increments = {j: [] for j in range(p)}
+    rng = np.random.default_rng(42)
+    for _ in range(n_permutations):
+        order = rng.permutation(p)
+        r2_prev = 0.0
+        included = []
+        for idx in order:
+            included.append(idx)
+            cols = [0] + [i + 1 for i in included]
+            try:
+                model = sm.OLS(y, X_const[:, cols]).fit()
+                r2_new = float(model.rsquared)
+                inc = r2_new - r2_prev
+                increments[idx].append(inc)
+                r2_prev = r2_new
+            except Exception:
+                increments[idx].append(0.0)
+    out = []
+    for j in range(p):
+        vals = increments[j]
+        avg = float(np.mean(vals)) if vals else 0.0
+        avg = max(0.0, min(r2_full, avg))
+        pct = (100.0 * avg / r2_full) if r2_full > 1e-12 else 0.0
+        out.append({'name': feature_names[j], 'weight': round(avg, 6), 'pct': round(pct, 2)})
+    return out
+
+
+@app.route('/api/relative-importance', methods=['POST'])
+def run_relative_importance():
+    """
+    Relative importance of key predictors (linear regression only).
+    Method: shapley (default, average incremental R²), johnson (relative weights), or dominance (general dominance = incremental R²).
+    Uses same data as regression: filters, imputation, then standardized covariates and y.
+    """
+    data = request.get_json() or {}
+    filename = data.get('filename')
+    target = data.get('target')
+    covariates = data.get('covariates') or []
+    controls = data.get('controls') or []
+    filters = data.get('filters')
+    if not filters and (data.get('filter_column') or data.get('filter_values')):
+        fc = data.get('filter_column') or ''
+        fv = data.get('filter_values') or []
+        fe = data.get('filter_exclude_na', False)
+        if fc and fv:
+            filters = [{'column': fc, 'values': fv, 'exclude_na': fe}]
+    filters = filters if isinstance(filters, list) else []
+    impute_missing = data.get('impute_missing', False)
+    impute_numeric_strategy = data.get('impute_numeric_strategy', 'median')
+    impute_categorical_strategy = data.get('impute_categorical_strategy', 'most_frequent')
+    method = (data.get('method') or 'shapley').lower()
+    if method not in ('shapley', 'johnson', 'dominance'):
+        method = 'shapley'
+
+    if not filename or not allowed_file(filename):
+        return jsonify({'error': 'Valid filename required'}), 400
+    if not target:
+        return jsonify({'error': 'Target variable is required'}), 400
+
+    path = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename(filename))
+    if not os.path.isfile(path):
+        return jsonify({'error': 'File not found'}), 404
+
+    try:
+        df = pd.read_csv(path)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 400
+
+    if target not in df.columns:
+        return jsonify({'error': f'Target column "{target}" not found'}), 400
+
+    for f in filters:
+        col = f.get('column') if isinstance(f, dict) else None
+        vals = f.get('values') if isinstance(f, dict) else []
+        exclude_na = f.get('exclude_na', False) if isinstance(f, dict) else False
+        if not col or col not in df.columns or not vals:
+            continue
+        if exclude_na:
+            ser = df[col]
+            null_mask = ser.isna()
+            str_ser = ser.astype(str).str.strip().str.lower()
+            na_like = str_ser.isin(['', 'na', 'nan', 'none', '.'])
+            df = df.loc[~(null_mask | na_like)].copy()
+        filter_str = df[col].astype(str)
+        df = df.loc[filter_str.isin([str(v) for v in vals])].copy()
+
+    cov_cols = [c for c in covariates if c in df.columns and c != target]
+    control_cols = [c for c in controls if c in df.columns and c != target]
+    all_pred_cols = list(dict.fromkeys(cov_cols + control_cols))
+    if not all_pred_cols:
+        return jsonify({'error': 'Select at least one covariate or control variable'}), 400
+
+    if impute_missing:
+        if impute_numeric_strategy not in ('median', 'mean'):
+            impute_numeric_strategy = 'median'
+        if impute_categorical_strategy not in ('most_frequent',):
+            impute_categorical_strategy = 'most_frequent'
+        df = _impute_predictors(df, all_pred_cols, numeric_strategy=impute_numeric_strategy, categorical_strategy=impute_categorical_strategy)
+
+    all_pred_cols = [target] + all_pred_cols
+    X_df, y_series, feature_names = _prepare_regression_data(df, target, all_pred_cols)
+    if X_df is None or len(X_df) < 2:
+        return jsonify({'error': 'Need at least one predictor and 2 valid rows'}), 400
+
+    y = y_series.values
+    X = X_df.values.astype(float)
+    mask = ~np.isnan(X).any(axis=1)
+    X = X[mask]
+    y = y[mask]
+    if len(y) < 2:
+        return jsonify({'error': 'Too few rows after removing missing values'}), 400
+
+    def _is_covariate_feature(fname, cov_list):
+        return fname in cov_list or any(str(fname).startswith(str(c) + '_') for c in cov_list)
+
+    for j in range(X.shape[1]):
+        if j < len(feature_names) and _is_covariate_feature(feature_names[j], cov_cols):
+            col = X[:, j]
+            mu, sig = col.mean(), col.std()
+            if sig > 1e-10:
+                X[:, j] = (col - mu) / sig
+
+    if df[target].dtype in (object, 'object') or (hasattr(df[target].dtype, 'kind') and df[target].dtype.kind not in 'iufc'):
+        return jsonify({'error': 'Relative importance is for linear regression only (continuous target)'}), 400
+    y = y.astype(float)
+    if _is_binary_target(pd.Series(y)):
+        return jsonify({'error': 'Relative importance is for linear regression only (binary target not supported)'}), 400
+
+    y_mean, y_std = float(np.mean(y)), float(np.std(y))
+    if y_std > 1e-10:
+        y = (y - y_mean) / y_std
+
+    X_const = sm.add_constant(X, has_constant='add')
+    try:
+        model = sm.OLS(y, X_const).fit()
+        r2 = float(model.rsquared)
+    except Exception as e:
+        return jsonify({'error': f'Model failed: {str(e)}'}), 400
+
+    if method == 'johnson':
+        importance = _johnson_relative_weights(X, y, feature_names, r2)
+    else:
+        importance = _shapley_or_dominance_incremental_r2(X, y, feature_names, r2)
+
+    importance_sorted = sorted(importance, key=lambda x: x['weight'], reverse=True)
+
+    return jsonify({
+        'success': True,
+        'method': method,
+        'method_label': 'Shapley value regression (average incremental R²)' if method == 'shapley' else (
+            "Johnson's relative weights" if method == 'johnson' else 'Dominance analysis (general dominance)'
+        ),
+        'r2': r2,
+        'n_obs': int(len(y)),
+        'importance': importance_sorted,
     })
 
 
@@ -779,12 +1108,30 @@ def export_report():
 
         # 4. Regression method overview
         story.append(Paragraph('4. Regression analysis method', styles['Heading2']))
-        method_text = 'Regression was run with target and predictor variables. Key predictors (covariates) were standardized (z-score) so coefficients are per 1 SD increase and comparable for relative importance. Control variables were included in original units. Model type was chosen from the target: linear regression for continuous targets, logistic regression for binary targets.'
+        method_generic = ' Key predictors (covariates) were standardized (z-score) so coefficients are per 1 SD increase and comparable for relative importance. Control variables were included in original units. Model type was chosen from the target: linear regression for continuous targets, logistic regression for binary targets.'
+        method_text = 'Regression was run with target and predictor variables.' + method_generic
         if regression_result:
             model_type = regression_result.get('model_type', 'linear')
             target = regression_result.get('target', '')
             n_obs = regression_result.get('n_obs', 0)
-            method_text = '{} regression of {} (N = {}). Key predictors were standardized (1 SD unit); control variables in original units.'.format(model_type.capitalize(), target, n_obs) + ' ' + method_text
+            method_text = '{} regression of {} (N = {}). Key predictors were standardized (1 SD unit); control variables in original units.'.format(model_type.capitalize(), target, n_obs)
+            if regression_result.get('y_standardized'):
+                method_text += ' The target (y) was also standardized (z-score).'
+            filters_used = regression_result.get('filters_used') or []
+            if filters_used:
+                for f in filters_used:
+                    fc = f.get('column', '')
+                    fv = f.get('values', [])
+                    ex = f.get('exclude_na', False)
+                    method_text += ' Subgroup filter: {} in {}'.format(fc, ', '.join(str(v) for v in fv))
+                    if ex:
+                        method_text += ' (exclude NA)'
+                    method_text += '.'
+            if regression_result.get('impute_used'):
+                method_text += ' Missing values in predictors were imputed (numeric: {}, categorical: {}).'.format(
+                    regression_result.get('impute_numeric_strategy', 'median'),
+                    regression_result.get('impute_categorical_strategy', 'most_frequent'))
+            method_text += method_generic
         story.append(Paragraph(method_text, styles['Normal']))
         story.append(Spacer(1, 0.25*inch))
 
